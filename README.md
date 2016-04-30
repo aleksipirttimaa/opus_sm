@@ -1,7 +1,7 @@
 Opus speech vs. music discriminator
 ===================================
 
-![Example fig](https://github.com/jzombi/opus_sm/sm/screenshot.png "Segmentation, framewise music probabilities, waveform")
+![Example fig](https://raw.githubusercontent.com/jzombi/opus_sm/master/sm/example.png "Segmentation, framewise music probabilities, waveform")
 
 Command line speech vs. music discriminator tool based on the built in speech vs. music discriminator of the Opus codec. This tool calculates the framewise music probabilities for a given audio file. Optionally also provides speech-music segmentation. See above example figure showing the segmentation, the framewise music probabilities and the waveform of an [example audio file](https://media.xiph.org/monty/demo/opus-3/speech_music_test.wa)v.
 
