@@ -33,6 +33,7 @@ void print_syntax(const char* argv0) {
 		printf("Usage: %s <infile> [outfile pmusic] [outfile labels] [sm min dur] [b min dur]\n", argv0);
 		printf("\n");
 		printf("    infile           path to a 16 bit, 48KHz sample rate PCM WAVE file\n");
+		printf("                         or '-' for raw stdin in same format (stereo)\n");
 		printf("    outfile pmusic   path of the music probability output file (default: stdout)\n");
 		printf("    outfile labels   path of the labels (m|s|b) output file\n");
 		printf("    sm min dur       speech & music labeled segments' min duration\n");
@@ -73,7 +74,7 @@ WAVE* open_wav(const char* infile, int verbose) {
 
 	if (wave->header.SampleRate != OPUS_SUPPORTED_FS) {
 		fprintf(stderr, "Sample rate %d Hz is not supported. Only files with sample rate %d Hz are accepted.\n",
-		        wave->header.SampleRate, OPUS_SUPPORTED_FS);
+				wave->header.SampleRate, OPUS_SUPPORTED_FS);
 		wave = wclose(wave);
 		return NULL;
 	}
@@ -95,11 +96,24 @@ OpusSM* init_opus(WAVE* wave) {
 	return sm;
 }
 
+/* Init Opus encoder, return it on success. Print error to stdout, release wave resource and return NULL on error. */
+OpusSM* init_opus_headerless(uint32_t samplerate, uint32_t numchannels) {
+	OpusSM* sm = sm_init(samplerate, numchannels);
+
+	if (sm_error(sm) != SM_OK) {
+		fprintf(stderr, "Opus encoder returned error on opus_encoder_create(). Error code: %d\n", sm_error(sm));
+		sm = sm_destroy(sm);
+		return NULL;
+	}
+
+	return sm;
+}
+
 
 /* Open file for writing. Return FILE* on success. Print error to stdout, return NULL on error. */
 FILE* open_output_file(const char* fname) {
 	if (fname == NULL) {
-	    return stdout;
+		return stdout;
 	}
 	FILE* o_file = fopen(fname, "w");
 	if (o_file == NULL) {
@@ -112,13 +126,13 @@ FILE* open_output_file(const char* fname) {
 
 /* Process wave file, write music probability and labels into the specified files. Return 0 on success, print error and return non-zero on error. */
 int process(const char* infile,
-            WAVE* wave,
-            OpusSM* sm,
-            FILE* ofp_pmusic,
-            FILE* ofp_labels,
-            double sm_segment_min_dur,
-            double b_segment_min_dur
-           )
+			WAVE* wave,
+			OpusSM* sm,
+			FILE* ofp_pmusic,
+			FILE* ofp_labels,
+			double sm_segment_min_dur,
+			double b_segment_min_dur
+		   )
 {
 	double frame_dur = (double)ANALYSIS_FRAME_SIZE/wave->header.SampleRate;
 	Labeler* lb = lb_init(sm_segment_min_dur/frame_dur, b_segment_min_dur/frame_dur);
@@ -166,6 +180,57 @@ int process(const char* infile,
 	return error;
 }
 
+/* Process stdin, write music probability and labels into the specified files. Return 0 on success, print error and return non-zero on error. */
+int process_headerless(
+			OpusSM* sm,
+			FILE* ofp_pmusic,
+			FILE* ofp_labels,
+			double sm_segment_min_dur,
+			double b_segment_min_dur
+		   )
+{
+	double frame_dur = (double)ANALYSIS_FRAME_SIZE/STDIN_SAMPLE_RATE;
+	Labeler* lb = lb_init(sm_segment_min_dur/frame_dur, b_segment_min_dur/frame_dur);
+
+	float*   analysis_pcm = malloc(ANALYSIS_FRAME_SIZE*STDIN_NUM_CHANNELS*sizeof(float));
+	int16_t* buffer       = malloc(ANALYSIS_FRAME_SIZE*STDIN_NUM_CHANNELS*sizeof(int16_t));
+
+	int error = 0;
+	for (int ii = 0; 1; ii = ii + ANALYSIS_FRAME_SIZE) {
+		/* read until eof */
+		int readcount = fread(buffer, (STDIN_BITS_PER_SAMPLE / 8)*STDIN_NUM_CHANNELS,ANALYSIS_FRAME_SIZE, stdin);
+
+		error = (readcount != ANALYSIS_FRAME_SIZE);
+
+		if (error) {
+			fprintf(stderr, "Could not read stdin, read count %d.\n", readcount);
+			break;
+		}
+
+		int2float(buffer, analysis_pcm, ANALYSIS_FRAME_SIZE, STDIN_NUM_CHANNELS);
+		float pmusic = sm_pmusic(sm, analysis_pcm);
+
+		if (ofp_labels != NULL) {
+			lb_add_frame(lb, pmusic);
+		}
+
+		fprintf(ofp_pmusic, "%f %f\n", (double)ii / STDIN_SAMPLE_RATE, pmusic);
+	}
+
+	if (!error) {
+		if (ofp_labels != NULL) {
+			lb_finalize(lb);
+			lb_print_to_file(lb, ofp_labels, frame_dur);
+		}
+	}
+
+	lb = lb_destroy(lb);
+	free(analysis_pcm);
+	free(buffer);
+
+	return error;
+}
+
 
 /* Main program. */
 int main(int argc, char* argv[]) {
@@ -177,7 +242,15 @@ int main(int argc, char* argv[]) {
 		return 1;
 	}
 
-	const char* infile  = argv[1];
+	const char* infile = argv[1];
+
+	/* detect wave or stdin */
+	int isWave = 1;
+	const char* stdinChar = "-";
+	if (!strcmp(stdinChar, infile)) {
+		isWave = 0;
+	}
+
 	const char* out_pmusic = NULL;
 	const char* out_labels = NULL;
 	double sm_segment_min_dur = 4.0f;
@@ -199,55 +272,87 @@ int main(int argc, char* argv[]) {
 		b_segment_min_dur = atof(argv[5]);
 	}
 
-	/* Load file */
-	
-	WAVE* wave = open_wav(infile, verbose);
-	
-	if (wave == NULL) {
-		return 1;
-	}
+	/* Wave or NULL */
+
+	WAVE* wave = NULL;
 
 	/* Init Opus encoder */
 
-	OpusSM* sm = init_opus(wave);
+	OpusSM* sm;
+	if (isWave) {
+		/* Parse wave */
+		wave = open_wav(infile, verbose);
+
+		if (wave == NULL) {
+			return 1;
+		}
+		sm = init_opus(wave);
+
+		if (sm == NULL) {
+			wave = wclose(wave);
+		}
+	} else {
+		/* !! format is hardcoded in header */
+		sm = init_opus_headerless(STDIN_SAMPLE_RATE, STDIN_NUM_CHANNELS);
+	}
 
 	if (sm == NULL) {
-		wclose(wave);
 		return 1;
 	}
+
+
 
 	/* Open output files */
 
 	FILE* ofp_pmusic = open_output_file(out_pmusic);
 	if (ofp_pmusic == NULL) {
-		wclose(wave);
+		if (wave != NULL) {
+			wave = wclose(wave);
+		}
 		sm_destroy(sm);
 		return 1;
 	}
 
 	FILE* ofp_labels = open_output_file(out_labels);
 	if (ofp_labels == NULL) {
-		wclose(wave);
+		if (wave != NULL) {
+			wave = wclose(wave);
+		}
 		sm_destroy(sm);
 		fclose(ofp_pmusic);
 		return 1;
 	}
 
 	/* Processing */
-	
-	int error = process(infile,
-	                    wave,
-	                    sm,
-	                    ofp_pmusic,
-	                    ofp_labels,
-	                    sm_segment_min_dur,
-	                    b_segment_min_dur
-	                   );
+	int error;
+	if (isWave) {
+		error = process(infile,
+							wave,
+							sm,
+							ofp_pmusic,
+							ofp_labels,
+							sm_segment_min_dur,
+							b_segment_min_dur
+						);
+	} else {
+		error = process_headerless(sm,
+							ofp_pmusic,
+							ofp_labels,
+							sm_segment_min_dur,
+							b_segment_min_dur
+						);
+	}
+
+
 
 	/* Clean up */
 
 	sm = sm_destroy(sm);
-	wave = wclose(wave);
+
+	if (wave != NULL) {
+		wave = wclose(wave);
+	}
+
 	fclose(ofp_pmusic);
 	fclose(ofp_labels);
 

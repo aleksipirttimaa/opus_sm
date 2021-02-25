@@ -18,6 +18,10 @@
 #define SM_ERR_UNSUPPORTED_SAMPLERATE      2
 #define SM_ERR_OPUS_ENC_CREATE_FAILED      3
 
+#define STDIN_BITS_PER_SAMPLE 16
+#define STDIN_SAMPLE_RATE 48000
+#define STDIN_NUM_CHANNELS 2
+
 typedef struct OpusSM {
 	OpusEncoder* opus_enc;
 	CELTEncoder* celt_enc;
