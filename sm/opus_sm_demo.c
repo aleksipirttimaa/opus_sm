@@ -216,6 +216,7 @@ int process_headerless(
 		}
 
 		fprintf(ofp_pmusic, "%f %f\n", (double)ii / STDIN_SAMPLE_RATE, pmusic);
+		fflush(ofp_pmusic);
 	}
 
 	if (!error) {
